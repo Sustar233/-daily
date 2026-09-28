@@ -1,0 +1,23 @@
+.private/
+output/
+__pycache__/
+*.pyc
+
+# Personal configuration and credentials
+/preferences.json
+.env
+.env.*
+!.env.example
+*.dpapi
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
+# Local environments and tooling
+.venv/
+venv/
+.pytest_cache/
+*.log

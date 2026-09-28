@@ -1,0 +1,6 @@
+interface:
+  display_name: "知乎双语日报"
+  short_description: "按兴趣筛选知乎热榜，以四级英文精读高赞回答，点击查看逐段中文翻译"
+  default_prompt: "使用 $zhihu-daily 给我知乎日报。"
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,22 @@
+{
+  "recipient": "",
+  "max_topics": 10,
+  "answers_per_topic": 2,
+  "exclude_topics": [],
+  "prefer_topics": [],
+  "exclude_keywords": [],
+  "prefer_keywords": [],
+  "english_level": "CET-4",
+  "delivery": "preview",
+  "reading_mode": "english_first",
+  "translation_mode": "paragraph_toggle",
+  "show_vote_counts": false,
+  "answer_target_words": [
+    120,
+    220
+  ],
+  "timezone": "Asia/Hong_Kong",
+  "answer_voice": "original",
+  "source_max_chars": 5000,
+  "incremental_cache": true
+}
