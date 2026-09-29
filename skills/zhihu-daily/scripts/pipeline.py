@@ -9,6 +9,7 @@ import sys
 import time
 
 from daily import api, matching_answers, now, plain, question_id, read, render, select_topics, write
+from preferences import apply_reading_preferences, clean_headline, reading_mode, rule_categories
 
 EDITOR_VERSION = 'direct-voice-v1'
 
@@ -18,7 +19,10 @@ def fingerprint(value):
 
 
 def language_key(kind, value, prefs):
-    return fingerprint([EDITOR_VERSION, kind, value, prefs['english_level'], prefs.get('answer_target_words', [120,220]), prefs.get('source_max_chars',5000)])
+    fields = [EDITOR_VERSION, kind, value, prefs['english_level'], prefs.get('answer_target_words', [120,220]), prefs.get('source_max_chars',5000)]
+    if prefs.get('translation_style'):
+        fields.append(prefs['translation_style'])
+    return fingerprint(fields)
 
 
 def load_cache(root):
@@ -27,10 +31,16 @@ def load_cache(root):
 
 
 def topic_key(item, prefs):
+    if reading_mode(item, prefs) == 'headline':
+        return language_key('headline-v1', clean_headline(item['title']), prefs)
+    if reading_mode(item, prefs) == 'deep':
+        return language_key('deep-topic-v1', [item['title'], item['summary']], prefs)
     return language_key('topic', [item['title'], item['summary']], prefs)
 
 
 def answer_key(item, answer, prefs):
+    if reading_mode(item, prefs) == 'deep':
+        return language_key('deep-answer-v1', [item['title'], answer['content'], prefs.get('preferred_answer_target_words', [220,340])], prefs)
     return language_key('answer', [item['title'], answer['content']], prefs)
 
 
@@ -49,11 +59,19 @@ def make_work(source, prefs, cache):
     work = {'topics': [], 'answers': [], 'questions': {}}
     hits = {'topics': 0, 'answers': 0}
     for index,item in enumerate(source['items'],1):
+        mode = reading_mode(item, prefs)
+        if mode == 'headline':
+            key = topic_key(item, prefs)
+            if key in cache['topics']:
+                hits['topics'] += 1
+            else:
+                work['topics'].append({'key':key, 'title':clean_headline(item['title']), 'reading_depth':'headline'})
+            continue
         key = topic_key(item, prefs)
         if key in cache['topics']:
             hits['topics'] += 1
         else:
-            work['topics'].append({'key': key, 'title': item['title'], 'summary': item['summary']})
+            work['topics'].append({'key': key, 'title': item['title'], 'summary': item['summary'], 'reading_depth': mode})
         for answer in item.get('answers', []):
             key = answer_key(item, answer, prefs)
             if key in cache['answers']:
@@ -62,7 +80,8 @@ def make_work(source, prefs, cache):
                 text, shortened = source_excerpt(answer['content'], prefs.get('source_max_chars', 5000))
                 q = str(index)
                 work['questions'][q] = item['title']
-                work['answers'].append({'key': key, 'q': q, 'text': text, 'excerpted': shortened})
+                work['answers'].append({'key': key, 'q': q, 'text': text, 'excerpted': shortened,
+                                        'reading_depth': mode, 'target_words': prefs.get('preferred_answer_target_words', [220,340]) if mode == 'deep' else prefs.get('answer_target_words', [120,220])})
     return work, hits
 
 
@@ -71,7 +90,7 @@ def prepare(root, offline=False, resume=False):
     cache = load_cache(root)
     out = root / 'output'
     if offline:
-        source = read(out / 'sources.json')
+        source = apply_reading_preferences(read(out / 'sources.json'), prefs)
     else:
         if resume:
             hot_data = read(out / 'hot.json')
@@ -91,14 +110,15 @@ def prepare(root, offline=False, resume=False):
             if not hot:
                 raise ValueError('Empty live hot list')
             hot_data = {'fetched_at': now(), 'items': hot}
-        required = sorted(set(prefs['exclude_topics'] + prefs['prefer_topics']))
+        required = sorted(set(prefs['exclude_topics'] + prefs['prefer_topics'] + prefs.get('headline_only_topics', [])) - set(prefs.get('topic_rules', {})))
         labels, missing = {}, []
         for item in hot:
             key = fingerprint([item['title'], item['summary'], required])
+            known = rule_categories(item, prefs)
             if not required:
-                labels[item['id']] = []
+                labels[item['id']] = known
             elif key in cache['labels']:
-                labels[item['id']] = cache['labels'][key]
+                labels[item['id']] = cache['labels'][key] + known
             else:
                 missing.append({'key': key, 'id': item['id'], 'title': item['title'], 'summary': item['summary']})
         write(out / 'hot.json', hot_data)
@@ -106,10 +126,12 @@ def prepare(root, offline=False, resume=False):
             write(out / 'classification-work.json', {'required_topics':required, 'items':missing})
             print(json.dumps({'status':'classification_needed','file':str(out/'classification-work.json'),'count':len(missing)},ensure_ascii=False))
             return
-        source = dict(hot_data, items=select_topics(hot,prefs,labels))
+        source = apply_reading_preferences(dict(hot_data, items=select_topics(hot,prefs,labels)), prefs)
         network_cache_path = root / '.private' / 'answer-fetch-cache.json'
         network_cache = read(network_cache_path) if network_cache_path.exists() else {}
         for item in source['items']:
+            if item['reading_depth'] == 'headline':
+                continue
             cached = network_cache.get(item['id'], {})
             if cached.get('title') == item['title'] and time.time()-cached.get('checked_at',0)<900:
                 item['answers'] = cached['answers'][:prefs['answers_per_topic']]
@@ -134,6 +156,8 @@ def prepare(root, offline=False, resume=False):
     report = {'status':'language_needed' if work['topics'] or work['answers'] else 'ready_to_build',
               'file':str(out/'language-work.json'),'topics':len(source['items']),
               'new_topics':len(work['topics']),'new_answers':len(work['answers']),
+              'headline_only':sum(reading_mode(x,prefs)=='headline' for x in source['items']),
+              'deep_topics':sum(reading_mode(x,prefs)=='deep' for x in source['items']),
               'cache_hits':hits,'model_input_chars':chars,'offline':offline}
     write(out / 'work-report.json', report)
     print(json.dumps(report,ensure_ascii=False))
@@ -155,7 +179,7 @@ def import_labels(root, edits):
 
 def build(root, edits=None, preview=False):
     prefs = read(root/'preferences.json')
-    source = read(root/'output/sources.json')
+    source = apply_reading_preferences(read(root/'output/sources.json'), prefs)
     cache = load_cache(root)
     changes = read(edits) if edits else {'topics':{},'answers':{}}
     work,_ = make_work(source,prefs,cache)
@@ -170,22 +194,36 @@ def build(root, edits=None, preview=False):
     if not source['items']:
         raise ValueError('No topics remain after filtering; do not send an empty daily')
     for item in source['items']:
+        mode = reading_mode(item, prefs)
+        if mode == 'headline':
+            edited = cache['topics'].get(topic_key(item,prefs))
+            if not edited or not edited.get('title_en') or not edited.get('title_zh'):
+                raise ValueError('Missing bilingual headline')
+            digest['items'].append({'id':item['id'], 'title_zh':edited['title_zh'], 'title_en':edited['title_en'],
+                                   'summary_en':'', 'summary_zh':'', 'answers':[], 'reading_depth':'headline'})
+            continue
         key = topic_key(item,prefs)
         if key not in cache['topics']:
             raise ValueError('Missing topic language work')
         edited = cache['topics'][key]
-        result = {'id':item['id'],'title_zh':item['title'],'title_en':edited['title_en'],
-                  'summary_en':edited['summary_en'],'summary_zh':edited['summary_zh'],'answers':[]}
+        if prefs.get('translation_style') and not edited.get('title_zh'):
+            raise ValueError('A literal Chinese translation of the English title is required')
+        result = {'id':item['id'],'title_zh':edited.get('title_zh',item['title']),'title_en':edited['title_en'],
+                  'summary_en':edited['summary_en'],'summary_zh':edited['summary_zh'],'answers':[],
+                  'reading_depth':mode,'key_points':edited.get('key_points', [])}
         digest['glossary'].update(edited.get('glossary',{}))
         for answer in item.get('answers',[]):
             key = answer_key(item,answer,prefs)
             if key not in cache['answers']:
                 raise ValueError('Missing answer language work')
             edited = cache['answers'][key]
+            if prefs.get('translation_style') and not edited.get('headline_zh'):
+                raise ValueError('A literal Chinese translation of the answer heading is required')
             paras = edited['paragraphs']
             if any(re.search(r'\b(the author|this author|this answer|the answer|the writer)\b',p['en'],re.I) or re.search(r'作者(认为|指出|强调|表示)|这(条|篇)回答|答主认为',p['zh']) for p in paras):
                 raise ValueError('Third-person reporting detected; preserve original voice')
             result['answers'].append({'id':answer['id'],'headline_en':edited['headline_en'],
+                                      'headline_zh':edited.get('headline_zh',''),
                                       'paragraphs':paras,'summary_en':'\n\n'.join(p['en'] for p in paras),
                                       'summary_zh':'\n\n'.join(p['zh'] for p in paras)})
             digest['glossary'].update(edited.get('glossary',{}))
@@ -207,7 +245,7 @@ def mail(root):
         raise ValueError('Mail delivery is not configured')
     if read(root/'output/build-report.json')['preview']:
         raise ValueError('Preview edition cannot be sent as a fresh daily')
-    source = read(root/'output/sources.json')
+    source = apply_reading_preferences(read(root/'output/sources.json'), prefs)
     from daily import validate_digest
     digest = read(root/'output/digest.json')
     validate_digest(digest,source)
@@ -219,7 +257,7 @@ def mail(root):
     payload={'to':prefs['recipient'],'subject':'知乎日报｜'+source['fetched_at'][:10]+'｜英文精读版',
              'payload':{'mime_type':'multipart/mixed','parts':[
                  {'mime_type':'text/html','charset':'UTF-8','body':{'content':(root/'output/email.html').read_text(encoding='utf-8')}},
-                 {'mime_type':'text/html','charset':'UTF-8','filename':'zhihu-daily.html','content_disposition':'attachment','body':{'content':(root/'output/zhihu-daily.html').read_text(encoding='utf-8')}}]},
+                 {'mime_type':'text/html','charset':'UTF-8','filename':'zhihu-daily-'+source['fetched_at'][:10]+'.html','content_disposition':'attachment','body':{'content':(root/'output/zhihu-daily.html').read_text(encoding='utf-8')}}]},
              'response_fields':['id','thread_id','label_ids']}
     print(json.dumps(payload,ensure_ascii=True,separators=(',',':')))
 

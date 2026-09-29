@@ -1,17 +1,10 @@
-"""English-first, self-contained reader. Native details work without JavaScript."""
+"""Compact reader with native, accessible translation controls."""
 import html
 import re
 from pathlib import Path
 
-CATEGORIES = {'国际': 'World', '经济': 'Economy', '教育': 'Education', '娱乐': 'Culture',
-              '体育': 'Sport', '职场': 'Work', '消费': 'Consumer', '社会': 'Society',
-              '健康': 'Health', '饮食': 'Food', '文化': 'Culture', '法律': 'Law',
-              '科技': 'Technology', '科学': 'Science', 'AI': 'AI'}
-
-
 def esc(value):
     return html.escape(str(value), quote=True)
-
 
 def annotated(text, glossary, used):
     terms = [term for term in glossary if term.casefold() not in used]
@@ -31,55 +24,71 @@ def annotated(text, glossary, used):
     chunks.append(esc(text[last:]))
     return ''.join(chunks)
 
-
-def translation(chinese, label='查看中文翻译'):
-    return '<details class="translation"><summary><span class="closed">' + label + '</span><span class="opened">收起中文翻译</span><span class="chevron" aria-hidden="true">⌄</span></summary><div lang="zh-CN">' + esc(chinese) + '</div></details>'
-
+def translation(chinese, label='Chinese translation'):
+    return ('<details class="translation"><summary aria-label="' + esc(label) + '" title="' + esc(label) + '">'
+            '<span aria-hidden="true">ZH</span><svg class="chevron" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">'
+            '<path d="m2 4 3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.2"/></svg></summary>'
+            '<div lang="zh-CN">' + esc(chinese) + '</div></details>')
 
 def render_reader(digest, source, *, preview=False):
     originals = {item['id']: item for item in source['items']}
     glossary = digest.get('glossary', {})
-    toc, articles, briefs = [], [], []
+    toc, articles, headlines = [], [], []
     total_words = 0
+    full_count = sum(i.get('reading_depth') != 'headline' for i in digest['items'])
     for index, item in enumerate(digest['items'], 1):
         raw = originals[item['id']]
         anchor = 'q' + item['id']
-        categories = ' / '.join(dict.fromkeys(CATEGORIES.get(c, c) for c in raw['categories'])) or 'Discussion'
-        toc.append(f'<li><a href="#{anchor}"><span class="nav-number">{index:02}</span><span>{esc(item["title_en"])}</span></a></li>')
+        mode = item.get('reading_depth', 'standard')
+        navtitle = item['title_en']
+        badge = '<span class="nav-tag">Focus</span>' if mode == 'deep' else ''
+        toc.append(f'<li><a href="#{anchor}"><span class="nav-number">{index:02}</span><span>{esc(navtitle)}{badge}</span></a></li>')
+        if mode == 'headline':
+            headlines.append(f'<div class="headline-row" id="{anchor}"><span class="nav-number">{index:02}</span><div><a lang="en" href="{esc(raw["url"])}" target="_blank" rel="noopener noreferrer">{esc(item["title_en"])} ↗</a>' + translation(item['title_zh']) + '</div></div>')
+            continue
         used = set()
-        heading = f'<div class="article-meta"><span>{esc(categories)}</span><span>TOPIC {index:02}</span></div>'
-        heading += f'<h2>{esc(item["title_en"])}</h2>' + translation(item['title_zh'], '查看中文标题')
-        heading += '<div class="intro"><p lang="en">' + annotated(item['summary_en'], glossary, used) + '</p>' + translation(item['summary_zh']) + '</div>'
+        label = 'FOCUS' if mode == 'deep' else f'{index:02} / READ'
+        block = f'<article class="article {mode}" id="{anchor}"><div class="article-meta"><span>{label}</span><a href="{esc(raw["url"])}" target="_blank" rel="noopener noreferrer">Zhihu ↗</a></div>'
+        block += '<h2>' + esc(item['title_en']) + '</h2>' + translation(item['title_zh'], 'Chinese title')
+        block += '<div class="intro"><p lang="en">' + annotated(item['summary_en'], glossary, used) + '</p>' + translation(item['summary_zh']) + '</div>'
         total_words += len(item['summary_en'].split())
+        if item.get('key_points'):
+            block += '<section class="key-points" aria-label="Key points"><h3>At a glance</h3><ul>'
+            for point in item['key_points']:
+                block += '<li><span lang="en">' + annotated(point['en'], glossary, used) + '</span></li>'
+                total_words += len(point['en'].split())
+            block += '</ul>' + translation('\n'.join('• ' + p['zh'] for p in item['key_points'])) + '</section>'
         answers = {a['id']: a for a in raw.get('answers', [])}
-        block = f'<article class="article" id="{anchor}"><div class="chapter">{index:02}</div>' + heading
         for answer_index, answer in enumerate(item['answers'], 1):
             origin = answers[answer['id']]
             used = set()
             paragraphs = answer.get('paragraphs') or [{'en': answer['summary_en'], 'zh': answer['summary_zh']}]
-            headline = answer.get('headline_en', f'A closer look · {answer_index:02}')
-            block += '<section class="answer"><div class="eyebrow">SELECTED PERSPECTIVE ' + f'{answer_index:02}</div><h3>' + esc(headline) + '</h3>'
+            block += '<section class="answer"><div class="answer-heading"><span class="answer-index">' + f'{answer_index:02}</span><h3>' + esc(answer.get('headline_en', 'A closer look')) + '</h3></div>'
+            if answer.get('headline_zh'):
+                block += '<div class="heading-translation">' + translation(answer['headline_zh'], 'Chinese heading') + '</div>'
             for paragraph in paragraphs:
                 block += '<div class="paragraph"><p lang="en">' + annotated(paragraph['en'], glossary, used) + '</p>' + translation(paragraph['zh']) + '</div>'
                 total_words += len(paragraph['en'].split())
             if answer.get('note_en'):
                 block += '<p class="editor-note">' + esc(answer['note_en']) + '</p>'
-            block += '<footer class="answer-source"><span>Original · <span lang="zh-CN">' + esc(origin['author']) + '</span></span><a href="' + esc(origin['url']) + '" target="_blank" rel="noopener noreferrer">Read original ↗</a></footer></section>'
+            block += '<footer class="answer-source"><span lang="zh-CN">' + esc(origin['author']) + '</span><a href="' + esc(origin['url']) + '" target="_blank" rel="noopener noreferrer">Read original ↗</a></footer></section>'
         if not item['answers']:
-            block += '<p class="editor-note">No matching answer was available for this topic.</p>'
-        block += '<footer class="article-footer"><a href="' + esc(raw['url']) + '" target="_blank" rel="noopener noreferrer">Question on Zhihu ↗</a><a href="#top">Back to top ↑</a></footer></article>'
+            block += '<p class="editor-note">No matching answer was available.</p>'
+        block += '</article>'
         articles.append(block)
-        briefs.append('<section><h2>' + esc(item['title_en']) + '</h2><p>' + esc(item['summary_en']) + '</p><p lang="zh-CN">' + esc(item['summary_zh']) + '</p></section>')
     minutes = max(1, round(total_words / 160))
-    date = source['fetched_at'][:10]
-    timestamp = source['fetched_at'][11:16]
+    date, timestamp = source['fetched_at'][:10], source['fetched_at'][11:16]
     style = (Path(__file__).parent / 'reader.css').read_text(encoding='utf-8')
-    preview_banner = '<div class="preview-banner">Design preview · Saved edition from ' + esc(date) + ' ' + esc(timestamp) + ' HKT</div>' if preview else ''
-    header = '<header class="masthead" id="top"><a class="brand" href="#top"><span class="brand-mark">知</span><span>THE DAILY<span class="brand-sub">ZHIHU &nbsp; / &nbsp; 知乎日报</span></span></a><div class="edition">' + esc(date.replace('-', '.')) + '<span>ENGLISH READING EDITION</span></div></header>'
-    hero = '<div class="hero"><div class="eyebrow"><span class="live-dot"></span> IDEAS, STORIES & PERSPECTIVES</div><h1>A little more of the world.<br><em>A little better at English.</em></h1><p>Your daily read from Zhihu. Clear English, thoughtful answers,<br class="desktop-break"> and Chinese only when you need it.</p><div class="hero-bottom"><span>' + str(len(digest['items'])) + ' topics <span class="meta-dot">·</span> ' + str(minutes) + ' min read <span class="meta-dot">·</span> CET-4 friendly</span><button id="translation-toggle" type="button" aria-pressed="false" hidden>显示全部翻译</button></div></div>'
-    sidebar = '<aside class="sidebar"><div class="sidebar-inner"><div class="eyebrow">IN THIS EDITION</div><ol>' + ''.join(toc) + '</ol><div class="reading-tip"><span class="tip-icon">Aa</span><p>Read in English first.</p><span>遇到难词看括号释义，<br>需要时点击段落下方查看翻译。</span></div></div></aside>'
-    footer = '<footer class="page-footer"><span>THE DAILY / 知乎日报</span><p>Adapted from Zhihu discussions. Views belong to their authors.<br>Selection favors higher-voted answers among the available search results.</p><span>Saved ' + esc(timestamp) + ' HKT</span></footer>'
-    script = '''const toggle=document.getElementById('translation-toggle');toggle.hidden=false;toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-pressed')!=='true';document.querySelectorAll('.translation').forEach(d=>d.open=open);toggle.setAttribute('aria-pressed',String(open));toggle.textContent=open?'收起全部翻译':'显示全部翻译';});const links=[...document.querySelectorAll('.sidebar a')];const observer=new IntersectionObserver(entries=>{const hit=entries.filter(e=>e.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top)[0];if(hit)links.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+hit.target.id));},{rootMargin:'-8% 0px -65% 0px',threshold:0});document.querySelectorAll('.article').forEach(a=>observer.observe(a));'''
-    page = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>The Daily · 知乎日报</title><style>' + style + '</style></head><body>' + preview_banner + '<div class="shell">' + header + hero + '<div class="reading-layout">' + sidebar + '<main>' + ''.join(articles) + '</main></div>' + footer + '</div><script>' + script + '</script></body></html>'
-    email = '<div style="max-width:760px;margin:auto;font:16px/1.8 sans-serif;color:#26382f"><h1>The Daily · 知乎日报</h1><p>' + esc(date) + '</p><p>Open the attached reading edition to reveal Chinese translations paragraph by paragraph.</p>' + ''.join(briefs) + '</div>'
+    edition = ('Preview · ' if preview else '') + date.replace('-', '.')
+    header = '<header class="masthead" id="top"><h1><a href="#top">Zhihu Daily<span class="brand-dot" aria-hidden="true"></span></a></h1><time datetime="' + esc(date) + '">' + esc(edition) + '</time></header>'
+    toolbar = '<div class="toolbar"><span>' + str(full_count) + ' reads' + (' · ' + str(len(headlines)) + ' brief' + ('s' if len(headlines) != 1 else '') if headlines else '') + ' <span class="divider">/</span> ' + str(minutes) + ' min</span><div><span class="level">CET-4</span><button id="translation-toggle" type="button" aria-label="Show all Chinese translations" aria-pressed="false" title="Toggle all Chinese translations" hidden><span aria-hidden="true">ZH</span> <span>All</span></button></div></div>'
+    sidebar = '<aside class="sidebar"><div class="sidebar-inner"><details class="toc" open><summary>Contents<span>' + str(len(digest['items'])) + ' topics <span class="toc-arrow" aria-hidden="true">⌄</span></span></summary><ol>' + ''.join(toc) + '</ol></details><p class="reading-tip"><span>ZH</span> Tap for Chinese</p></div></aside>'
+    headline_section = '<section class="headlines"><div class="section-label"><h2>Quick look</h2><span>Headlines only</span></div>' + ''.join(headlines) + '</section>' if headlines else ''
+    footer = '<footer class="page-footer"><span>Adapted from Zhihu · Views belong to their authors.</span><span>Updated ' + esc(timestamp) + ' HKT <a href="#top" aria-label="Back to top">↑</a></span></footer>'
+    script = '''const toggle=document.getElementById('translation-toggle');const translations=[...document.querySelectorAll('.translation')];toggle.hidden=false;const sync=()=>{const all=translations.length>0&&translations.every(d=>d.open);toggle.setAttribute('aria-pressed',String(all));toggle.setAttribute('aria-label',all?'收起全部中文翻译':'显示全部中文翻译');};toggle.addEventListener('click',()=>{const open=toggle.getAttribute('aria-pressed')!=='true';translations.forEach(d=>d.open=open);sync();});translations.forEach(d=>d.addEventListener('toggle',sync));const links=[...document.querySelectorAll('.sidebar a')];const observer=new IntersectionObserver(entries=>{const hit=entries.filter(e=>e.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top)[0];if(hit)links.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+hit.target.id));},{rootMargin:'-8% 0px -65% 0px',threshold:0});document.querySelectorAll('.article,.headline-row').forEach(a=>observer.observe(a));'''
+    script = script.replace('收起全部中文翻译', 'Hide all Chinese translations').replace('显示全部中文翻译', 'Show all Chinese translations')
+    script += '''const toc=document.querySelector('.toc');const smallScreen=window.matchMedia('(max-width:720px)');const sizeToc=()=>{toc.open=!smallScreen.matches;};sizeToc();smallScreen.addEventListener('change',sizeToc);links.forEach(a=>a.addEventListener('click',()=>{if(smallScreen.matches)toc.open=false;}));'''
+    page = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Zhihu Daily · ' + esc(date) + '</title><style>' + style + '</style></head><body><div class="shell">' + header + toolbar + '<div class="reading-layout">' + sidebar + '<main>' + ''.join(articles) + headline_section + '</main></div>' + footer + '</div><script>' + script + '</script></body></html>'
+    filename = 'zhihu-daily-' + date + '.html'
+    email = '<p style="margin:12px 0;font:14px/1.6 Arial,sans-serif;color:#34433d">Open the attached <strong>' + esc(filename) + '</strong>.</p>'
     return page, email

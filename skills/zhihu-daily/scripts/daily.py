@@ -154,9 +154,16 @@ def validate_digest(digest, source, *, preview=False):
         raise ValueError('Digest must preserve selected topic IDs and order')
     for item in digest['items']:
         raw = topics[item['id']]
+        if item.get('reading_depth') == 'headline':
+            if raw.get('reading_depth') != 'headline' or item.get('answers') or not all(item.get(k, '').strip() for k in ('title_zh','title_en')):
+                raise ValueError('Headline-only topics require a source preference and no answers')
+            continue
         for field in ('title_zh', 'title_en', 'summary_zh', 'summary_en'):
             if not isinstance(item.get(field), str) or not item[field].strip():
                 raise ValueError(f'Missing bilingual field: {field}')
+        if any(not all(isinstance(p.get(lang), str) and p[lang].strip() for lang in ('en', 'zh'))
+               for p in item.get('key_points', [])):
+            raise ValueError('Each key point needs English and Chinese')
         answers = {a['id']: a for a in raw.get('answers', [])}
         if len({a['id'] for a in item['answers']}) != len(item['answers']):
             raise ValueError('Duplicate answer ID')
@@ -219,7 +226,11 @@ def main():
         print(f'Selected {len(hot["items"])} topics')
     elif args.action == 'answers':
         source = read(out / 'selected.json')
+        from preferences import apply_reading_preferences
+        source = apply_reading_preferences(source, prefs)
         for item in source['items']:
+            if item['reading_depth'] == 'headline':
+                continue
             try:
                 data = api('zhihu_search', {'Query': item['title'], 'Count': 10})
                 item['answers'] = matching_answers(data['Items'], item['id'], prefs['answers_per_topic'])
